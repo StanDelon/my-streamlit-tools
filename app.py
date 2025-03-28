@@ -7,6 +7,7 @@ import hashlib
 import base64
 from io import StringIO
 import chardet
+from typing import List, Dict, Set
 
 # Настройки страницы
 st.set_page_config(
