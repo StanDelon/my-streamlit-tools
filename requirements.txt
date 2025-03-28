@@ -2,3 +2,6 @@ streamlit
 pandas
 pymorphy3
 chardet
+prophet
+plotly
+requests
