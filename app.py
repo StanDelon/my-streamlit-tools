@@ -120,7 +120,11 @@ def parse_semantic_core(text):
 
 def build_hierarchy(phrases):
     """Строит иерархию фраз с учетом частоты вхождений"""
-    hierarchy = defaultdict(lambda: {'count': 0, 'phrases': [], 'subgroups': defaultdict(dict)})
+    hierarchy = defaultdict(lambda: {
+        'count': 0,
+        'phrases': [],
+        'subgroups': defaultdict(lambda: {'count': 0, 'phrases': []})
+    })
     
     for phrase in phrases:
         words = phrase.split()
@@ -150,6 +154,19 @@ def build_hierarchy(phrases):
         if not added:
             hierarchy[phrase]['phrases'].append(phrase)
             hierarchy[phrase]['count'] += 1
+    
+    # Преобразуем defaultdict в обычные dict для стабильности
+    def convert_to_regular_dict(d):
+        if isinstance(d, defaultdict):
+            d = dict(d)
+            for k, v in d.items():
+                d[k] = convert_to_regular_dict(v)
+        elif isinstance(d, dict):
+            for k, v in d.items():
+                d[k] = convert_to_regular_dict(v)
+        return d
+    
+    hierarchy = convert_to_regular_dict(hierarchy)
     
     # Сортируем по количеству вхождений
     sorted_hierarchy = {}
