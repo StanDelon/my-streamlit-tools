@@ -29,12 +29,10 @@ def parse_exclude_input(user_input):
     if not user_input:
         return []
     
-    # Обработка многострочного ввода
     if '\n' in user_input:
         lines = [line.strip() for line in user_input.split('\n') if line.strip()]
         return [item for line in lines for item in parse_exclude_input(line)]
     
-    # Обработка вариантов в скобках (word1|word2)
     if '(' in user_input and ')' in user_input and '|' in user_input:
         parts = []
         remaining = user_input
@@ -51,7 +49,6 @@ def parse_exclude_input(user_input):
             parts.extend(parse_exclude_input(remaining))
         return parts
     
-    # Обычный ввод через запятую или |
     delimiters = [',', '|'] if '|' in user_input else [',']
     for delim in delimiters:
         if delim in user_input:
@@ -66,25 +63,21 @@ def get_exclusion_patterns(exclude_list, morph):
         if not item:
             continue
             
-        # Обработка регулярных выражений
         if item.startswith('/') and item.endswith('/'):
             pattern = item[1:-1]
             patterns.append((pattern, True, True))
             continue
             
-        # Обработка точного совпадения
         force_exact = item.startswith('!')
         if force_exact:
             item = item[1:]
             
-        # Обработка масок *
         if '*' in item:
             escaped = re.escape(item)
             pattern = escaped.replace(r'\*', r'\w*')
             pattern = r'\b' + pattern + r'\b'
             patterns.append((pattern, False, True))
         else:
-            # Нормализация слова/фразы
             words = re.findall(r'\w+', item.lower())
             normalized_words = [normalize_word(w, morph, force_exact) for w in words]
             pattern = r'\b' + r'\s+'.join(normalized_words) + r'\b'
@@ -118,156 +111,195 @@ def process_phrases(phrases, exclude_patterns, morph, min_word_length=3):
                 normalized = normalize_word(word, morph)
                 words_counter[normalized] += 1
     
-    # Сортируем по частоте, затем по алфавиту
     return [word for word, count in sorted(words_counter.items(), key=lambda x: (-x[1], x[0]))]
 
 # ===== Инструмент 2: Группировка семантического ядра =====
 def parse_semantic_core(text):
-    """Parse semantic core text into a list of phrases"""
-    phrases = [line.strip() for line in text.split('\n') if line.strip()]
-    return phrases
+    """Разбивает текст на список фраз"""
+    return [line.strip() for line in text.split('\n') if line.strip()]
 
 def build_hierarchy(phrases):
-    """Build a hierarchical structure from phrases"""
-    hierarchy = defaultdict(lambda: defaultdict(list))
+    """Строит иерархию фраз с учетом частоты вхождений"""
+    hierarchy = defaultdict(lambda: {'count': 0, 'phrases': [], 'subgroups': defaultdict(dict)})
     
     for phrase in phrases:
-        parts = phrase.split()
-        if len(parts) > 0:
-            first_word = parts[0]
-            rest = ' '.join(parts[1:]) if len(parts) > 1 else ''
-            
-            if rest:
-                hierarchy[first_word][rest].append(phrase)
-            else:
-                hierarchy[first_word]['__LEAVES__'].append(phrase)
+        words = phrase.split()
+        
+        # Находим все возможные группы от длинных к коротким
+        possible_groups = []
+        for i in range(1, len(words)+1):
+            group = ' '.join(words[:i])
+            possible_groups.append((group, i))
+        
+        possible_groups.sort(key=lambda x: -x[1])
+        
+        # Добавляем фразу в самую длинную подходящую группу
+        added = False
+        for group, _ in possible_groups:
+            if group in hierarchy:
+                remaining = ' '.join(words[len(group.split()):]).strip()
+                if remaining:
+                    hierarchy[group]['subgroups'][remaining]['phrases'].append(phrase)
+                    hierarchy[group]['subgroups'][remaining]['count'] += 1
+                else:
+                    hierarchy[group]['phrases'].append(phrase)
+                    hierarchy[group]['count'] += 1
+                added = True
+                break
+        
+        if not added:
+            hierarchy[phrase]['phrases'].append(phrase)
+            hierarchy[phrase]['count'] += 1
     
-    return hierarchy
+    # Сортируем по количеству вхождений
+    sorted_hierarchy = {}
+    for group in sorted(hierarchy.keys(), key=lambda x: -hierarchy[x]['count']):
+        sorted_subgroups = {}
+        for subgroup in sorted(hierarchy[group]['subgroups'].keys(), 
+                             key=lambda x: -hierarchy[group]['subgroups'][x]['count']):
+            sorted_subgroups[subgroup] = hierarchy[group]['subgroups'][subgroup]
+        
+        sorted_hierarchy[group] = {
+            'count': hierarchy[group]['count'],
+            'phrases': hierarchy[group]['phrases'],
+            'subgroups': sorted_subgroups
+        }
+    
+    return sorted_hierarchy
 
-def display_hierarchy(hierarchy, level=0, excluded_words=None):
-    """Recursively display hierarchy with checkboxes"""
-    if excluded_words is None:
-        excluded_words = set()
+def display_hierarchy(hierarchy, excluded_phrases=None):
+    """Отображает иерархию с чекбоксами"""
+    if excluded_phrases is None:
+        excluded_phrases = set()
     
-    for group, subgroups in sorted(hierarchy.items()):
-        # Check if any phrase in this group is already excluded
-        group_excluded = any(phrase in excluded_words for phrase in subgroups.get('__LEAVES__', []))
+    for group, data in hierarchy.items():
+        all_excluded = all(phrase in excluded_phrases for phrase in data['phrases'])
         
-        # Create a unique key for the checkbox
-        checkbox_key = f"group_{level}_{group}"
+        group_excluded = st.checkbox(
+            f"{group} ({data['count']})", 
+            value=all_excluded,
+            key=f"group_{group}"
+        )
         
-        # Display group checkbox
-        excluded = st.checkbox(group, value=group_excluded, key=checkbox_key)
-        
-        if excluded:
-            # Add all phrases in this group to excluded words
-            if '__LEAVES__' in subgroups:
-                excluded_words.update(subgroups['__LEAVES__'])
-            
-            # Add all nested phrases to excluded words
-            for subgroup, phrases in subgroups.items():
-                if subgroup != '__LEAVES__':
-                    excluded_words.update(phrases)
+        if group_excluded:
+            excluded_phrases.update(data['phrases'])
         else:
-            # Remove from excluded words if unchecked
-            if '__LEAVES__' in subgroups:
-                excluded_words.difference_update(subgroups['__LEAVES__'])
-            
-            for subgroup, phrases in subgroups.items():
-                if subgroup != '__LEAVES__':
-                    excluded_words.difference_update(phrases)
-            
-            # Display subgroups if any
-            if len(subgroups) > 1 or (len(subgroups) == 1 and '__LEAVES__' not in subgroups):
-                with st.expander(f"Подгруппы для '{group}'"):
-                    for subgroup, phrases in subgroups.items():
-                        if subgroup == '__LEAVES__':
-                            continue
-                            
-                        # Check if any phrase in this subgroup is excluded
-                        subgroup_excluded = any(phrase in excluded_words for phrase in phrases)
-                        
-                        # Create unique key for subgroup checkbox
-                        subgroup_key = f"subgroup_{level}_{group}_{subgroup}"
-                        
-                        # Display subgroup checkbox
-                        sub_excluded = st.checkbox(
-                            subgroup, 
-                            value=subgroup_excluded,
-                            key=subgroup_key
-                        )
-                        
-                        if sub_excluded:
-                            excluded_words.update(phrases)
-                        else:
-                            excluded_words.difference_update(phrases)
-                        
-                        # Display phrases in this subgroup
-                        with st.expander(f"Фразы в '{subgroup}'"):
-                            for phrase in phrases:
-                                st.write(phrase)
+            excluded_phrases.difference_update(data['phrases'])
+        
+        if data['subgroups']:
+            with st.expander(f"Подгруппы ({len(data['subgroups'])})"):
+                for subgroup, sub_data in data['subgroups'].items():
+                    sub_all_excluded = all(phrase in excluded_phrases for phrase in sub_data['phrases'])
+                    
+                    sub_excluded = st.checkbox(
+                        f"{subgroup} ({sub_data['count']})",
+                        value=sub_all_excluded,
+                        key=f"subgroup_{group}_{subgroup}"
+                    )
+                    
+                    if sub_excluded:
+                        excluded_phrases.update(sub_data['phrases'])
+                    else:
+                        excluded_phrases.difference_update(sub_data['phrases'])
+                    
+                    with st.expander(f"Фразы ({len(sub_data['phrases'])})"):
+                        for phrase in sub_data['phrases']:
+                            st.write(phrase)
+        
+        if data['phrases']:
+            with st.expander(f"Фразы группы ({len(data['phrases'])})"):
+                for phrase in data['phrases']:
+                    st.write(phrase)
     
-    return excluded_words
+    return excluded_phrases
 
 def semantic_core_grouper():
     st.header("📊 Группировка семантического ядра")
-    st.write("Загрузите семантическое ядро (каждая фраза на новой строке)")
     
-    uploaded_file = st.file_uploader("Выберите файл с семантическим ядром", type=['txt'], key="semantic_core_uploader")
-    if uploaded_file is not None:
-        text = uploaded_file.read().decode('utf-8')
-        phrases = parse_semantic_core(text)
-        
-        if phrases:
-            st.success(f"Загружено {len(phrases)} фраз")
-            
-            # Initialize session state for excluded words
-            if 'excluded_words' not in st.session_state:
-                st.session_state.excluded_words = set()
-            
-            # Build hierarchy
-            hierarchy = build_hierarchy(phrases)
-            
-            st.subheader("Группировка фраз")
-            excluded_words = display_hierarchy(
-                hierarchy, 
-                excluded_words=st.session_state.excluded_words
-            )
-            
-            # Update session state
-            st.session_state.excluded_words = excluded_words
-            
-            # Display excluded words
-            st.subheader("Исключенные фразы")
-            if st.session_state.excluded_words:
-                st.write("\n".join(sorted(st.session_state.excluded_words)))
-                if st.button("Очистить исключенные", key="clear_excluded"):
-                    st.session_state.excluded_words = set()
-                    st.experimental_rerun()
-            else:
-                st.write("Нет исключенных фраз")
-            
-            # Display remaining phrases
-            st.subheader("Оставшиеся фразы")
-            all_phrases = set(phrases)
-            remaining_phrases = all_phrases - st.session_state.excluded_words
-            st.write("\n".join(sorted(remaining_phrases)))
+    example_phrases = """
+сборка душевой кабины villagio
+сборка душевой кабины villagio 120 80 215
+сборка душевой кабины villagio ks 6690m
+сборка душевой кабины виладжио
+сборка душевой кабины вилладжио
+ремонт душевой кабины
+ремонт душевой кабины villagio
+установка душевой кабины
+установка душевой кабины виладжио
+"""
+    
+    st.subheader("1. Загрузите семантическое ядро")
+    input_type = st.radio("Выберите источник данных", ["Пример данных", "Загрузить файл"], key="data_source")
+    
+    if input_type == "Пример данных":
+        phrases = parse_semantic_core(example_phrases)
+    else:
+        uploaded_file = st.file_uploader("Выберите текстовый файл", type=['txt'], key="core_uploader")
+        if uploaded_file:
+            text = uploaded_file.read().decode('utf-8')
+            phrases = parse_semantic_core(text)
         else:
-            st.warning("Не найдено фраз в файле")
+            st.warning("Пожалуйста, загрузите файл")
+            return
+    
+    if not phrases:
+        st.error("Не найдено фраз для анализа!")
+        return
+    
+    st.success(f"Загружено {len(phrases)} фраз")
+    
+    st.subheader("2. Группировка фраз")
+    hierarchy = build_hierarchy(phrases)
+    
+    if 'excluded_phrases' not in st.session_state:
+        st.session_state.excluded_phrases = set()
+    
+    st.session_state.excluded_phrases = display_hierarchy(
+        hierarchy,
+        st.session_state.excluded_phrases
+    )
+    
+    st.subheader("3. Управление исключениями")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("Очистить все исключения", key="clear_exclusions"):
+            st.session_state.excluded_phrases = set()
+            st.experimental_rerun()
+    
+    with col2:
+        if st.button("Исключить все фразы", key="exclude_all"):
+            st.session_state.excluded_phrases = set(phrases)
+            st.experimental_rerun()
+    
+    st.subheader("4. Результаты")
+    
+    tab1, tab2 = st.tabs(["Исключенные фразы", "Оставшиеся фразы"])
+    
+    with tab1:
+        if st.session_state.excluded_phrases:
+            st.write("\n".join(sorted(st.session_state.excluded_phrases)))
+        else:
+            st.info("Нет исключенных фраз")
+    
+    with tab2:
+        remaining = set(phrases) - st.session_state.excluded_phrases
+        if remaining:
+            st.write("\n".join(sorted(remaining)))
+        else:
+            st.warning("Все фразы исключены")
 
 # ===== Инструмент 3: Хэширование телефонов =====
 def hash_phone(phone):
     phone_str = str(phone).strip()
     if not phone_str:
         return ""
-    # Нормализация номера (удаляем всё, кроме цифр)
     digits = re.sub(r'\D', '', phone_str)
     if not digits:
         return ""
     return hashlib.sha256(digits.encode('utf-8')).hexdigest()
 
 def get_table_download_link(df):
-    """Генерирует ссылку для скачивания DataFrame"""
     csv = df.to_csv(index=False, encoding='utf-8-sig')
     b64 = base64.b64encode(csv.encode('utf-8-sig')).decode()
     return f'<a href="data:file/csv;base64,{b64}" download="processed_data.csv">Скачать CSV</a>'
@@ -276,10 +308,9 @@ def get_table_download_link(df):
 st.title("🔧 Маркетинг-инструменты")
 st.markdown("---")
 
-# Добавляем инструмент в меню
 tool_options = [
     "Генератор минус-слов",
-    "Группировка семантического ядра",
+    "Группировка семантического ядра", 
     "Хэширование телефонов"
 ]
 
@@ -355,7 +386,6 @@ if tool == "Генератор минус-слов":
                     
                     st.success("✅ Готово!")
                     
-                    # Показываем результат в двух вариантах
                     tab1, tab2 = st.tabs(["Текстовый формат", "Список для копирования"])
                     
                     with tab1:
@@ -378,7 +408,6 @@ if tool == "Генератор минус-слов":
                         st.markdown("---")
                         st.subheader("📊 Статистика по словам")
                         
-                        # Создаем DataFrame для визуализации
                         words_count = Counter()
                         for phrase in phrases_list:
                             words = re.findall(r'\b\w+\b', phrase.lower())
@@ -392,8 +421,6 @@ if tool == "Генератор минус-слов":
                         df_stats = df_stats.sort_values(by='Частота', ascending=False)
                         
                         st.dataframe(df_stats.head(50))
-                        
-                        # Гистограмма топ-20 слов
                         st.bar_chart(df_stats.head(20))
                 
                 except Exception as e:
@@ -414,14 +441,10 @@ elif tool == "Хэширование телефонов":
     
     if uploaded_file:
         try:
-            # Определяем тип файла и загружаем данные
             if uploaded_file.name.endswith('.csv'):
-                # Пытаемся определить кодировку для CSV
                 content = uploaded_file.getvalue()
                 result = chardet.detect(content)
                 encoding = result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
-                
-                # Читаем CSV с учетом кодировки
                 uploaded_file.seek(0)
                 df = pd.read_csv(uploaded_file, encoding=encoding)
             else:
@@ -453,21 +476,13 @@ elif tool == "Хэширование телефонов":
                 if st.button("🔒 Хэшировать данные", type="primary", key="hash_phones_button"):
                     with st.spinner("Обработка..."):
                         try:
-                            # Создаем копию исходных данных
                             result_df = df.copy()
-                            
-                            # Хэшируем телефоны
                             result_df[new_column_name] = result_df[phone_column].apply(hash_phone)
-                            
                             st.success("Готово! Первые 5 строк:")
                             st.dataframe(result_df.head())
-                            
-                            # Кнопка скачивания
                             st.markdown(get_table_download_link(result_df), unsafe_allow_html=True)
-                        
                         except Exception as e:
                             st.error(f"Ошибка при обработке: {str(e)}")
-        
         except Exception as e:
             st.error(f"Ошибка при загрузке файла: {str(e)}")
 
