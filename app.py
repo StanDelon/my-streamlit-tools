@@ -185,48 +185,59 @@ def build_hierarchy(phrases):
     return sorted_hierarchy
 
 def display_hierarchy(hierarchy, excluded_phrases=None):
-    """Отображает иерархию с чекбоксами"""
+    """Отображает иерархию с чекбоксами без вложенных expanders"""
     if excluded_phrases is None:
         excluded_phrases = set()
     
+    # Создаем контейнер для отображения
+    container = st.container()
+    
     for group, data in hierarchy.items():
-        all_excluded = all(phrase in excluded_phrases for phrase in data['phrases'])
-        
-        group_excluded = st.checkbox(
-            f"{group} ({data['count']})", 
-            value=all_excluded,
-            key=f"group_{group}"
-        )
-        
-        if group_excluded:
-            excluded_phrases.update(data['phrases'])
-        else:
-            excluded_phrases.difference_update(data['phrases'])
-        
-        if data['subgroups']:
-            with st.expander(f"Подгруппы ({len(data['subgroups'])})"):
-                for subgroup, sub_data in data['subgroups'].items():
-                    sub_all_excluded = all(phrase in excluded_phrases for phrase in sub_data['phrases'])
-                    
-                    sub_excluded = st.checkbox(
-                        f"{subgroup} ({sub_data['count']})",
-                        value=sub_all_excluded,
-                        key=f"subgroup_{group}_{subgroup}"
-                    )
-                    
-                    if sub_excluded:
-                        excluded_phrases.update(sub_data['phrases'])
-                    else:
-                        excluded_phrases.difference_update(sub_data['phrases'])
-                    
-                    with st.expander(f"Фразы ({len(sub_data['phrases'])})"):
-                        for phrase in sub_data['phrases']:
-                            st.write(phrase)
-        
-        if data['phrases']:
-            with st.expander(f"Фразы группы ({len(data['phrases'])})"):
-                for phrase in data['phrases']:
-                    st.write(phrase)
+        with container:
+            # Отображаем группу
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                group_excluded = st.checkbox(
+                    f"{group} ({data['count']})", 
+                    value=all(phrase in excluded_phrases for phrase in data['phrases']),
+                    key=f"group_{group}"
+                )
+            
+            if group_excluded:
+                excluded_phrases.update(data['phrases'])
+            else:
+                excluded_phrases.difference_update(data['phrases'])
+            
+            # Отображаем подгруппы
+            if data['subgroups']:
+                subgroup_container = st.container()
+                with subgroup_container:
+                    st.write("Подгруппы:")
+                    for subgroup, sub_data in data['subgroups'].items():
+                        sub_col1, sub_col2 = st.columns([1, 4])
+                        with sub_col1:
+                            sub_excluded = st.checkbox(
+                                f"{subgroup} ({sub_data['count']})",
+                                value=all(phrase in excluded_phrases for phrase in sub_data['phrases']),
+                                key=f"subgroup_{group}_{subgroup}"
+                            )
+                        
+                        if sub_excluded:
+                            excluded_phrases.update(sub_data['phrases'])
+                        else:
+                            excluded_phrases.difference_update(sub_data['phrases'])
+                        
+                        # Отображаем фразы подгруппы
+                        if sub_data['phrases']:
+                            with st.expander(f"Показать фразы ({len(sub_data['phrases'])})"):
+                                for phrase in sub_data['phrases']:
+                                    st.write(phrase)
+            
+            # Отображаем фразы группы
+            if data['phrases']:
+                with st.expander(f"Фразы группы ({len(data['phrases'])})"):
+                    for phrase in data['phrases']:
+                        st.write(phrase)
     
     return excluded_phrases
 
@@ -268,13 +279,16 @@ def semantic_core_grouper():
     st.subheader("2. Группировка фраз")
     hierarchy = build_hierarchy(phrases)
     
-    if 'excluded_phrases' not in st.session_state:
+   if 'excluded_phrases' not in st.session_state:
         st.session_state.excluded_phrases = set()
     
-    st.session_state.excluded_phrases = display_hierarchy(
-        hierarchy,
-        st.session_state.excluded_phrases
-    )
+    # Создаем контейнер для иерархии
+    hierarchy_container = st.container()
+    with hierarchy_container:
+        st.session_state.excluded_phrases = display_hierarchy(
+            hierarchy,
+            st.session_state.excluded_phrases
+        )
     
     st.subheader("3. Управление исключениями")
     col1, col2 = st.columns(2)
