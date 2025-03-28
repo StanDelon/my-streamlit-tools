@@ -276,19 +276,16 @@ def semantic_core_grouper():
     
     st.success(f"Загружено {len(phrases)} фраз")
     
-        st.subheader("2. Группировка фраз")
+    st.subheader("2. Группировка фраз")
     hierarchy = build_hierarchy(phrases)
     
     if 'excluded_phrases' not in st.session_state:
         st.session_state.excluded_phrases = set()
     
-    # Создаем контейнер для иерархии
-    hierarchy_container = st.container()
-    with hierarchy_container:
-        st.session_state.excluded_phrases = display_hierarchy(
-            hierarchy,
-            st.session_state.excluded_phrases
-        )
+    st.session_state.excluded_phrases = display_hierarchy(
+        hierarchy,
+        st.session_state.excluded_phrases
+    )
     
     st.subheader("3. Управление исключениями")
     col1, col2 = st.columns(2)
@@ -319,7 +316,6 @@ def semantic_core_grouper():
             st.write("\n".join(sorted(remaining)))
         else:
             st.warning("Все фразы исключены")
-
 # ===== Инструмент 3: Хэширование телефонов =====
 def hash_phone(phone):
     phone_str = str(phone).strip()
