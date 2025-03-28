@@ -1,13 +1,11 @@
 import streamlit as st
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 import pymorphy3
 import pandas as pd
 import hashlib
 import base64
 from io import StringIO
-import chardet
-from typing import List, Dict, Set
 
 # Настройки страницы
 st.set_page_config(
@@ -15,11 +13,6 @@ st.set_page_config(
     page_icon="🔧",
     layout="wide"
 )
-
-# ===== Общие функции =====
-def parse_semantic_core(text: str) -> List[str]:
-    """Парсит текст семантического ядра в список фраз"""
-    return [line.strip() for line in text.split('\n') if line.strip()]
 
 # ===== Инструмент 1: Генератор минус-слов =====
 def prepare_morph_analyzer():
@@ -35,10 +28,12 @@ def parse_exclude_input(user_input):
     if not user_input:
         return []
     
+    # Обработка многострочного ввода
     if '\n' in user_input:
         lines = [line.strip() for line in user_input.split('\n') if line.strip()]
         return [item for line in lines for item in parse_exclude_input(line)]
     
+    # Обработка вариантов в скобках (word1|word2)
     if '(' in user_input and ')' in user_input and '|' in user_input:
         parts = []
         remaining = user_input
@@ -55,6 +50,7 @@ def parse_exclude_input(user_input):
             parts.extend(parse_exclude_input(remaining))
         return parts
     
+    # Обычный ввод через запятую или |
     delimiters = [',', '|'] if '|' in user_input else [',']
     for delim in delimiters:
         if delim in user_input:
@@ -69,21 +65,25 @@ def get_exclusion_patterns(exclude_list, morph):
         if not item:
             continue
             
+        # Обработка регулярных выражений
         if item.startswith('/') and item.endswith('/'):
             pattern = item[1:-1]
             patterns.append((pattern, True, True))
             continue
             
+        # Обработка точного совпадения
         force_exact = item.startswith('!')
         if force_exact:
             item = item[1:]
             
+        # Обработка масок *
         if '*' in item:
             escaped = re.escape(item)
             pattern = escaped.replace(r'\*', r'\w*')
             pattern = r'\b' + pattern + r'\b'
             patterns.append((pattern, False, True))
         else:
+            # Нормализация слова/фразы
             words = re.findall(r'\w+', item.lower())
             normalized_words = [normalize_word(w, morph, force_exact) for w in words]
             pattern = r'\b' + r'\s+'.join(normalized_words) + r'\b'
@@ -117,174 +117,15 @@ def process_phrases(phrases, exclude_patterns, morph, min_word_length=3):
                 normalized = normalize_word(word, morph)
                 words_counter[normalized] += 1
     
+    # Сортируем по частоте, затем по алфавиту
     return [word for word, count in sorted(words_counter.items(), key=lambda x: (-x[1], x[0]))]
 
-# ===== Инструмент 2: Древовидная группировка =====
-def build_hierarchy(phrases: List[str]) -> Dict[str, Dict]:
-    """Строит иерархическую структуру из фраз"""
-    hierarchy = defaultdict(lambda: {
-        'count': 0,
-        'phrases': [],
-        'subgroups': defaultdict(lambda: {'count': 0, 'phrases': []})
-    })
-    
-    for phrase in phrases:
-        words = phrase.split()
-        
-        possible_groups = []
-        for i in range(1, len(words)+1):
-            group = ' '.join(words[:i])
-            possible_groups.append((group, i))
-        
-        possible_groups.sort(key=lambda x: -x[1])
-        
-        added = False
-        for group, _ in possible_groups:
-            if group in hierarchy:
-                remaining = ' '.join(words[len(group.split()):]).strip()
-                if remaining:
-                    hierarchy[group]['subgroups'][remaining]['phrases'].append(phrase)
-                    hierarchy[group]['subgroups'][remaining]['count'] += 1
-                else:
-                    hierarchy[group]['phrases'].append(phrase)
-                    hierarchy[group]['count'] += 1
-                added = True
-                break
-        
-        if not added:
-            hierarchy[phrase]['phrases'].append(phrase)
-            hierarchy[phrase]['count'] += 1
-    
-    def convert_to_regular(d):
-        if isinstance(d, defaultdict):
-            d = {k: convert_to_regular(v) for k, v in d.items()}
-        return d
-    
-    hierarchy = convert_to_regular(hierarchy)
-    
-    sorted_hierarchy = {}
-    for group in sorted(hierarchy.keys(), key=lambda x: -hierarchy[x]['count']):
-        sorted_subgroups = {}
-        for subgroup in sorted(hierarchy[group]['subgroups'].keys(), 
-                             key=lambda x: -hierarchy[group]['subgroups'][x]['count']):
-            sorted_subgroups[subgroup] = hierarchy[group]['subgroups'][subgroup]
-        
-        sorted_hierarchy[group] = {
-            'count': hierarchy[group]['count'],
-            'phrases': hierarchy[group]['phrases'],
-            'subgroups': sorted_subgroups
-        }
-    
-    return sorted_hierarchy
-
-def render_tree_node(group: str, data: Dict, excluded_phrases: Set[str], level: int = 0):
-    """Рендерит узел дерева с чекбоксом"""
-    indent = "    " * level
-    container = st.container()
-    
-    with container:
-        cols = st.columns([1, 4])
-        with cols[0]:
-            excluded = st.checkbox(
-                f"{group} ({data['count']})",
-                value=all(p in excluded_phrases for p in data['phrases']),
-                key=f"node_{level}_{hash(group)}"
-            )
-        
-        if excluded:
-            excluded_phrases.update(data['phrases'])
-        else:
-            excluded_phrases.difference_update(data['phrases'])
-        
-        if data['subgroups']:
-            with st.expander(f"{indent}Подгруппы ({len(data['subgroups'])})"):
-                for subgroup, sub_data in data['subgroups'].items():
-                    render_tree_node(subgroup, sub_data, excluded_phrases, level+1)
-        
-        if data['phrases']:
-            with st.expander(f"{indent}Фразы ({len(data['phrases'])})"):
-                for phrase in data['phrases']:
-                    st.write(f"{indent}{phrase}")
-
-def semantic_core_grouper():
-    """Инструмент древовидной группировки"""
-    st.header("🌳 Древовидная группировка семантического ядра")
-    
-    example_phrases = """
-сборка душевой кабины villagio
-сборка душевой кабины villagio 120 80 215
-сборка душевой кабины villagio ks 6690m
-сборка душевой кабины виладжио
-сборка душевой кабины вилладжио
-ремонт душевой кабины
-ремонт душевой кабины villagio
-установка душевой кабины
-установка душевой кабины виладжио
-"""
-    
-    st.subheader("1. Загрузите данные")
-    input_type = st.radio("Источник данных", ["Пример данных", "Загрузить файл"], key="data_source")
-    
-    if input_type == "Пример данных":
-        phrases = parse_semantic_core(example_phrases)
-    else:
-        uploaded_file = st.file_uploader("Выберите файл (.txt)", type=['txt'], key="file_uploader")
-        if uploaded_file:
-            text = uploaded_file.read().decode('utf-8')
-            phrases = parse_semantic_core(text)
-        else:
-            st.warning("Загрузите файл для продолжения")
-            return
-    
-    if not phrases:
-        st.error("Нет фраз для анализа!")
-        return
-    
-    st.success(f"Загружено {len(phrases)} фраз")
-    
-    st.subheader("2. Древовидная структура")
-    hierarchy = build_hierarchy(phrases)
-    
-    if 'excluded_phrases' not in st.session_state:
-        st.session_state.excluded_phrases = set()
-    
-    tree_container = st.container()
-    with tree_container:
-        for group, data in hierarchy.items():
-            render_tree_node(group, data, st.session_state.excluded_phrases)
-    
-    st.subheader("3. Управление исключениями")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Очистить все исключения", key="clear_all"):
-            st.session_state.excluded_phrases = set()
-            st.rerun()
-    with col2:
-        if st.button("Исключить все фразы", key="exclude_all"):
-            st.session_state.excluded_phrases = set(phrases)
-            st.rerun()
-    
-    st.subheader("4. Результаты")
-    tab1, tab2 = st.tabs(["Исключенные фразы", "Оставшиеся фразы"])
-    
-    with tab1:
-        if st.session_state.excluded_phrases:
-            st.write("\n".join(sorted(st.session_state.excluded_phrases)))
-        else:
-            st.info("Нет исключенных фраз")
-    
-    with tab2:
-        remaining = set(phrases) - st.session_state.excluded_phrases
-        if remaining:
-            st.write("\n".join(sorted(remaining)))
-        else:
-            st.warning("Все фразы исключены")
-
-# ===== Инструмент 3: Хэширование телефонов =====
+# ===== Инструмент 2: Хэширование телефонов =====
 def hash_phone(phone):
     phone_str = str(phone).strip()
     if not phone_str:
         return ""
+    # Нормализация номера (удаляем всё, кроме цифр)
     digits = re.sub(r'\D', '', phone_str)
     if not digits:
         return ""
@@ -296,203 +137,197 @@ def get_table_download_link(df):
     b64 = base64.b64encode(csv.encode('utf-8-sig')).decode()
     return f'<a href="data:file/csv;base64,{b64}" download="processed_data.csv">Скачать CSV</a>'
 
-# ===== Главный интерфейс =====
-def main():
-    st.title("🔧 Маркетинг-инструменты")
-    st.markdown("---")
+# ===== Веб-интерфейс =====
+st.title("🔧 Маркетинг-инструменты")
+st.markdown("---")
 
-    tool_options = [
-        "Генератор минус-слов",
-        "Древовидная группировка", 
-        "Хэширование телефонов"
-    ]
+tool = st.sidebar.radio(
+    "Выберите инструмент",
+    ["Генератор минус-слов", "Хэширование телефонов"],
+    index=0
+)
 
-    tool = st.sidebar.selectbox(
-        "Выберите инструмент",
-        tool_options,
-        index=0
-    )
-
-    if tool == "Генератор минус-слов":
-        st.header("📉 Генератор минус-слов для рекламы")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("1. Введите фразы для анализа")
-            phrases = st.text_area(
-                "Каждая фраза с новой строки",
-                height=200,
-                help="Вставьте список фраз, которые нужно проанализировать",
-                key="phrases_input"
-            )
-            
-        with col2:
-            st.subheader("2. Укажите исключения")
-            exclude = st.text_area(
-                "Формат: слово1, слово2, (вариант1|вариант2), /регэксп/",
-                height=200,
-                help="""Можно использовать:
-                - Запятые: слово1, слово2
-                - Варианты: (вилладжио|villagio)
-                - Маски: ремонт*
-                - Регулярки: /цена|стоимость/
-                - Точные совпадения: !онлайн""",
-                key="exclude_input"
-            )
-        
-        st.markdown("---")
-        st.subheader("3. Настройки обработки")
-        
-        col_set1, col_set2 = st.columns(2)
-        with col_set1:
-            min_length = st.slider(
-                "Минимальная длина слова",
-                min_value=1,
-                max_value=10,
-                value=3,
-                help="Слова короче указанной длины будут игнорироваться",
-                key="min_length_slider"
-            )
-        
-        with col_set2:
-            show_stats = st.checkbox(
-                "Показать статистику по словам",
-                value=True,
-                help="Отображает частоту встречаемости слов",
-                key="show_stats_checkbox"
-            )
-        
-        if st.button("🚀 Сгенерировать минус-слова", type="primary", key="generate_minus_words"):
-            if not phrases:
-                st.error("Введите фразы для анализа!")
-            else:
-                with st.spinner("Обработка данных..."):
-                    try:
-                        morph = prepare_morph_analyzer()
-                        exclude_list = parse_exclude_input(exclude)
-                        exclude_patterns = get_exclusion_patterns(exclude_list, morph)
-                        phrases_list = [p.strip() for p in phrases.split('\n') if p.strip()]
-                        
-                        minus_words = process_phrases(phrases_list, exclude_patterns, morph, min_length)
-                        result = " ".join([f"-{word}" for word in minus_words])
-                        
-                        st.success("✅ Готово!")
-                        
-                        tab1, tab2 = st.tabs(["Текстовый формат", "Список для копирования"])
-                        
-                        with tab1:
-                            st.text_area(
-                                "Результат (текст)",
-                                value=result,
-                                height=100,
-                                key="result_text"
-                            )
-                        
-                        with tab2:
-                            st.text_area(
-                                "Результат (по одному на строку)",
-                                value="\n".join([f"-{word}" for word in minus_words]),
-                                height=200,
-                                key="result_list"
-                            )
-                        
-                        if show_stats:
-                            st.markdown("---")
-                            st.subheader("📊 Статистика по словам")
-                            
-                            words_count = Counter()
-                            for phrase in phrases_list:
-                                words = re.findall(r'\b\w+\b', phrase.lower())
-                                for word in words:
-                                    if len(word) >= min_length:
-                                        normalized = normalize_word(word, morph)
-                                        if not should_exclude(normalized, exclude_patterns):
-                                            words_count[normalized] += 1
-                            
-                            df_stats = pd.DataFrame.from_dict(words_count, orient='index', columns=['Частота'])
-                            df_stats = df_stats.sort_values(by='Частота', ascending=False)
-                            
-                            st.dataframe(df_stats.head(50))
-                            st.bar_chart(df_stats.head(20))
-                    
-                    except Exception as e:
-                        st.error(f"Ошибка обработки: {str(e)}")
-
-    elif tool == "Древовидная группировка":
-        semantic_core_grouper()
-
-    elif tool == "Хэширование телефонов":
-        st.header("📞 Хэширование номеров телефонов")
-        
-        uploaded_file = st.file_uploader(
-            "Загрузите файл (Excel или CSV)",
-            type=["xlsx", "xls", "csv"],
-            accept_multiple_files=False,
-            key="phone_hash_uploader"
+if tool == "Генератор минус-слов":
+    st.header("📉 Генератор минус-слов для рекламы")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("1. Введите фразы для анализа")
+        phrases = st.text_area(
+            "Каждая фраза с новой строки",
+            height=200,
+            help="Вставьте список фраз, которые нужно проанализировать"
         )
         
-        if uploaded_file:
-            try:
-                if uploaded_file.name.endswith('.csv'):
-                    content = uploaded_file.getvalue()
-                    result = chardet.detect(content)
-                    encoding = result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
-                    uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, encoding=encoding)
-                else:
-                    df = pd.read_excel(uploaded_file)
-                
-                st.success(f"Успешно загружено {len(df)} записей")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.subheader("Предпросмотр данных")
-                    st.dataframe(df.head())
-                
-                with col2:
-                    st.subheader("Настройки обработки")
-                    phone_column = st.selectbox(
-                        "Выберите столбец с телефонами",
-                        df.columns,
-                        index=0,
-                        key="phone_column_select"
-                    )
-                    
-                    new_column_name = st.text_input(
-                        "Название для нового столбца с хэшами",
-                        value="phone_hash",
-                        key="new_column_name_input"
-                    )
-                    
-                    if st.button("🔒 Хэшировать данные", type="primary", key="hash_phones_button"):
-                        with st.spinner("Обработка..."):
-                            try:
-                                result_df = df.copy()
-                                result_df[new_column_name] = result_df[phone_column].apply(hash_phone)
-                                st.success("Готово! Первые 5 строк:")
-                                st.dataframe(result_df.head())
-                                st.markdown(get_table_download_link(result_df), unsafe_allow_html=True)
-                            except Exception as e:
-                                st.error(f"Ошибка при обработке: {str(e)}")
-            except Exception as e:
-                st.error(f"Ошибка при загрузке файла: {str(e)}")
-
-    # Футер
+    with col2:
+        st.subheader("2. Укажите исключения")
+        exclude = st.text_area(
+            "Формат: слово1, слово2, (вариант1|вариант2), /регэксп/",
+            height=200,
+            help="""Можно использовать:
+            - Запятые: слово1, слово2
+            - Варианты: (вилладжио|villagio)
+            - Маски: ремонт*
+            - Регулярки: /цена|стоимость/
+            - Точные совпадения: !онлайн"""
+        )
+    
     st.markdown("---")
-    st.markdown("""
-    <style>
-    .footer {
-        font-size: small;
-        color: gray;
-        text-align: center;
-    }
-    </style>
-    <div class="footer">
-        Маркетинг-инструменты | 2023
-    </div>
-    """, unsafe_allow_html=True)
+    st.subheader("3. Настройки обработки")
+    
+    col_set1, col_set2 = st.columns(2)
+    with col_set1:
+        min_length = st.slider(
+            "Минимальная длина слова",
+            min_value=1,
+            max_value=10,
+            value=3,
+            help="Слова короче указанной длины будут игнорироваться"
+        )
+    
+    with col_set2:
+        show_stats = st.checkbox(
+            "Показать статистику по словам",
+            value=True,
+            help="Отображает частоту встречаемости слов"
+        )
+    
+    if st.button("🚀 Сгенерировать минус-слова", type="primary"):
+        if not phrases:
+            st.error("Введите фразы для анализа!")
+        else:
+            with st.spinner("Обработка данных..."):
+                try:
+                    morph = prepare_morph_analyzer()
+                    exclude_list = parse_exclude_input(exclude)
+                    exclude_patterns = get_exclusion_patterns(exclude_list, morph)
+                    phrases_list = [p.strip() for p in phrases.split('\n') if p.strip()]
+                    
+                    minus_words = process_phrases(phrases_list, exclude_patterns, morph, min_length)
+                    result = " ".join([f"-{word}" for word in minus_words])
+                    
+                    st.success("✅ Готово!")
+                    
+                    # Показываем результат в двух вариантах
+                    tab1, tab2 = st.tabs(["Текстовый формат", "Список для копирования"])
+                    
+                    with tab1:
+                        st.text_area(
+                            "Результат (текст)",
+                            value=result,
+                            height=100
+                        )
+                    
+                    with tab2:
+                        st.text_area(
+                            "Результат (по одному на строку)",
+                            value="\n".join([f"-{word}" for word in minus_words]),
+                            height=200
+                        )
+                    
+                    if show_stats:
+                        st.markdown("---")
+                        st.subheader("📊 Статистика по словам")
+                        
+                        # Создаем DataFrame для визуализации
+                        words_count = Counter()
+                        for phrase in phrases_list:
+                            words = re.findall(r'\b\w+\b', phrase.lower())
+                            for word in words:
+                                if len(word) >= min_length:
+                                    normalized = normalize_word(word, morph)
+                                    if not should_exclude(normalized, exclude_patterns):
+                                        words_count[normalized] += 1
+                        
+                        df_stats = pd.DataFrame.from_dict(words_count, orient='index', columns=['Частота'])
+                        df_stats = df_stats.sort_values(by='Частота', ascending=False)
+                        
+                        st.dataframe(df_stats.head(50))
+                        
+                        # Гистограмма топ-20 слов
+                        st.bar_chart(df_stats.head(20))
+                
+                except Exception as e:
+                    st.error(f"Ошибка обработки: {str(e)}")
 
-if __name__ == "__main__":
-    main()
+elif tool == "Хэширование телефонов":
+    st.header("📞 Хэширование номеров телефонов")
+    
+    uploaded_file = st.file_uploader(
+        "Загрузите файл (Excel или CSV)",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=False
+    )
+    
+    if uploaded_file:
+        try:
+            # Определяем тип файла и загружаем данные
+            if uploaded_file.name.endswith('.csv'):
+                # Пытаемся определить кодировку для CSV
+                content = uploaded_file.getvalue()
+                result = chardet.detect(content)
+                encoding = result['encoding'] if result['confidence'] > 0.7 else 'utf-8'
+                
+                # Читаем CSV с учетом кодировки
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, encoding=encoding)
+            else:
+                df = pd.read_excel(uploaded_file)
+            
+            st.success(f"Успешно загружено {len(df)} записей")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Предпросмотр данных")
+                st.dataframe(df.head())
+            
+            with col2:
+                st.subheader("Настройки обработки")
+                phone_column = st.selectbox(
+                    "Выберите столбец с телефонами",
+                    df.columns,
+                    index=0
+                )
+                
+                new_column_name = st.text_input(
+                    "Название для нового столбца с хэшами",
+                    value="phone_hash"
+                )
+                
+                if st.button("🔒 Хэшировать данные", type="primary"):
+                    with st.spinner("Обработка..."):
+                        try:
+                            # Создаем копию исходных данных
+                            result_df = df.copy()
+                            
+                            # Хэшируем телефоны
+                            result_df[new_column_name] = result_df[phone_column].apply(hash_phone)
+                            
+                            st.success("Готово! Первые 5 строк:")
+                            st.dataframe(result_df.head())
+                            
+                            # Кнопка скачивания
+                            st.markdown(get_table_download_link(result_df), unsafe_allow_html=True)
+                        
+                        except Exception as e:
+                            st.error(f"Ошибка при обработке: {str(e)}")
+        
+        except Exception as e:
+            st.error(f"Ошибка при загрузке файла: {str(e)}")
+
+# Футер
+st.markdown("---")
+st.markdown("""
+<style>
+.footer {
+    font-size: small;
+    color: gray;
+    text-align: center;
+}
+</style>
+<div class="footer">
+    Маркетинг-инструменты | 2023
+</div>
+""", unsafe_allow_html=True)
