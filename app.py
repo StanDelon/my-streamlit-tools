@@ -276,10 +276,10 @@ def semantic_core_grouper():
     
     st.success(f"Загружено {len(phrases)} фраз")
     
-    st.subheader("2. Группировка фраз")
+        st.subheader("2. Группировка фраз")
     hierarchy = build_hierarchy(phrases)
     
-   if 'excluded_phrases' not in st.session_state:
+    if 'excluded_phrases' not in st.session_state:
         st.session_state.excluded_phrases = set()
     
     # Создаем контейнер для иерархии
