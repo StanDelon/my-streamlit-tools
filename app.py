@@ -114,12 +114,14 @@ def process_phrases(phrases, exclude_patterns, morph, min_word_length=3):
     return [word for word, count in sorted(words_counter.items(), key=lambda x: (-x[1], x[0]))]
 
 # ===== Инструмент 2: Группировка семантического ядра =====
-def parse_semantic_core(text):
-    """Разбивает текст на список фраз"""
+def parse_semantic_core(text: str) -> List[str]:
+    """Парсит текст семантического ядра в список фраз"""
     return [line.strip() for line in text.split('\n') if line.strip()]
 
-def build_hierarchy(phrases):
-    """Строит иерархию фраз с учетом частоты вхождений"""
+def build_hierarchy(phrases: List[str]) -> Dict[str, Dict]:
+    """
+    Строит иерархическую структуру из фраз
+    """
     hierarchy = defaultdict(lambda: {
         'count': 0,
         'phrases': [],
@@ -129,7 +131,7 @@ def build_hierarchy(phrases):
     for phrase in phrases:
         words = phrase.split()
         
-        # Находим все возможные группы от длинных к коротким
+        # Находим все возможные группы (от самых длинных к коротким)
         possible_groups = []
         for i in range(1, len(words)+1):
             group = ' '.join(words[:i])
@@ -155,20 +157,15 @@ def build_hierarchy(phrases):
             hierarchy[phrase]['phrases'].append(phrase)
             hierarchy[phrase]['count'] += 1
     
-    # Преобразуем defaultdict в обычные dict для стабильности
-    def convert_to_regular_dict(d):
+    # Преобразуем defaultdict в обычные dict
+    def convert_to_regular(d):
         if isinstance(d, defaultdict):
-            d = dict(d)
-            for k, v in d.items():
-                d[k] = convert_to_regular_dict(v)
-        elif isinstance(d, dict):
-            for k, v in d.items():
-                d[k] = convert_to_regular_dict(v)
+            d = {k: convert_to_regular(v) for k, v in d.items()}
         return d
     
-    hierarchy = convert_to_regular_dict(hierarchy)
+    hierarchy = convert_to_regular(hierarchy)
     
-    # Сортируем по количеству вхождений
+    # Сортируем группы и подгруппы по количеству вхождений
     sorted_hierarchy = {}
     for group in sorted(hierarchy.keys(), key=lambda x: -hierarchy[x]['count']):
         sorted_subgroups = {}
@@ -184,66 +181,42 @@ def build_hierarchy(phrases):
     
     return sorted_hierarchy
 
-def display_hierarchy(hierarchy, excluded_phrases=None):
-    """Отображает иерархию с чекбоксами без вложенных expanders"""
-    if excluded_phrases is None:
-        excluded_phrases = set()
-    
-    # Создаем контейнер для отображения
+def render_tree_node(group: str, data: Dict, excluded_phrases: Set[str], level: int = 0):
+    """Рендерит узел дерева с чекбоксом"""
+    indent = "    " * level
     container = st.container()
     
-    for group, data in hierarchy.items():
-        with container:
-            # Отображаем группу
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                group_excluded = st.checkbox(
-                    f"{group} ({data['count']})", 
-                    value=all(phrase in excluded_phrases for phrase in data['phrases']),
-                    key=f"group_{group}"
-                )
-            
-            if group_excluded:
-                excluded_phrases.update(data['phrases'])
-            else:
-                excluded_phrases.difference_update(data['phrases'])
-            
-            # Отображаем подгруппы
-            if data['subgroups']:
-                subgroup_container = st.container()
-                with subgroup_container:
-                    st.write("Подгруппы:")
-                    for subgroup, sub_data in data['subgroups'].items():
-                        sub_col1, sub_col2 = st.columns([1, 4])
-                        with sub_col1:
-                            sub_excluded = st.checkbox(
-                                f"{subgroup} ({sub_data['count']})",
-                                value=all(phrase in excluded_phrases for phrase in sub_data['phrases']),
-                                key=f"subgroup_{group}_{subgroup}"
-                            )
-                        
-                        if sub_excluded:
-                            excluded_phrases.update(sub_data['phrases'])
-                        else:
-                            excluded_phrases.difference_update(sub_data['phrases'])
-                        
-                        # Отображаем фразы подгруппы
-                        if sub_data['phrases']:
-                            with st.expander(f"Показать фразы ({len(sub_data['phrases'])})"):
-                                for phrase in sub_data['phrases']:
-                                    st.write(phrase)
-            
-            # Отображаем фразы группы
-            if data['phrases']:
-                with st.expander(f"Фразы группы ({len(data['phrases'])})"):
-                    for phrase in data['phrases']:
-                        st.write(phrase)
-    
-    return excluded_phrases
+    with container:
+        cols = st.columns([1, 4])
+        with cols[0]:
+            excluded = st.checkbox(
+                f"{group} ({data['count']})",
+                value=all(p in excluded_phrases for p in data['phrases']),
+                key=f"node_{level}_{group}"
+            )
+        
+        if excluded:
+            excluded_phrases.update(data['phrases'])
+        else:
+            excluded_phrases.difference_update(data['phrases'])
+        
+        # Обрабатываем подгруппы
+        if data['subgroups']:
+            with st.expander(f"{indent}Подгруппы ({len(data['subgroups'])})"):
+                for subgroup, sub_data in data['subgroups'].items():
+                    render_tree_node(subgroup, sub_data, excluded_phrases, level+1)
+        
+        # Показываем фразы группы
+        if data['phrases']:
+            with st.expander(f"{indent}Фразы ({len(data['phrases'])})"):
+                for phrase in data['phrases']:
+                    st.write(f"{indent}{phrase}")
 
 def semantic_core_grouper():
-    st.header("📊 Группировка семантического ядра")
+    """Основная функция для группировки семантического ядра"""
+    st.header("🌳 Древовидная группировка семантического ядра")
     
+    # Пример данных
     example_phrases = """
 сборка душевой кабины villagio
 сборка душевой кабины villagio 120 80 215
@@ -256,52 +229,55 @@ def semantic_core_grouper():
 установка душевой кабины виладжио
 """
     
-    st.subheader("1. Загрузите семантическое ядро")
-    input_type = st.radio("Выберите источник данных", ["Пример данных", "Загрузить файл"], key="data_source")
+    # Загрузка данных
+    st.subheader("1. Загрузите данные")
+    input_type = st.radio("Источник данных", ["Пример данных", "Загрузить файл"], key="data_source")
     
     if input_type == "Пример данных":
         phrases = parse_semantic_core(example_phrases)
     else:
-        uploaded_file = st.file_uploader("Выберите текстовый файл", type=['txt'], key="core_uploader")
+        uploaded_file = st.file_uploader("Выберите файл (.txt)", type=['txt'], key="file_uploader")
         if uploaded_file:
             text = uploaded_file.read().decode('utf-8')
             phrases = parse_semantic_core(text)
         else:
-            st.warning("Пожалуйста, загрузите файл")
+            st.warning("Загрузите файл для продолжения")
             return
     
     if not phrases:
-        st.error("Не найдено фраз для анализа!")
+        st.error("Нет фраз для анализа!")
         return
     
     st.success(f"Загружено {len(phrases)} фраз")
     
-    st.subheader("2. Группировка фраз")
+    # Построение иерархии
+    st.subheader("2. Древовидная структура")
     hierarchy = build_hierarchy(phrases)
     
+    # Инициализация состояния
     if 'excluded_phrases' not in st.session_state:
         st.session_state.excluded_phrases = set()
     
-    st.session_state.excluded_phrases = display_hierarchy(
-        hierarchy,
-        st.session_state.excluded_phrases
-    )
+    # Отображение дерева
+    tree_container = st.container()
+    with tree_container:
+        for group, data in hierarchy.items():
+            render_tree_node(group, data, st.session_state.excluded_phrases)
     
+    # Управление исключениями
     st.subheader("3. Управление исключениями")
     col1, col2 = st.columns(2)
-    
     with col1:
-        if st.button("Очистить все исключения", key="clear_exclusions"):
+        if st.button("Очистить все исключения", key="clear_all"):
             st.session_state.excluded_phrases = set()
-            st.experimental_rerun()
-    
+            st.rerun()
     with col2:
         if st.button("Исключить все фразы", key="exclude_all"):
             st.session_state.excluded_phrases = set(phrases)
-            st.experimental_rerun()
+            st.rerun()
     
+    # Результаты
     st.subheader("4. Результаты")
-    
     tab1, tab2 = st.tabs(["Исключенные фразы", "Оставшиеся фразы"])
     
     with tab1:
@@ -316,6 +292,21 @@ def semantic_core_grouper():
             st.write("\n".join(sorted(remaining)))
         else:
             st.warning("Все фразы исключены")
+
+# Интеграция с основным приложением
+def main():
+    st.title("🔧 Маркетинг-инструменты")
+    tool = st.sidebar.selectbox(
+        "Выберите инструмент",
+        ["Генератор минус-слов", "Древовидная группировка", "Хэширование телефонов"]
+    )
+    
+    if tool == "Древовидная группировка":
+        semantic_core_grouper()
+    # ... остальные инструменты
+
+if __name__ == "__main__":
+    main()
 # ===== Инструмент 3: Хэширование телефонов =====
 def hash_phone(phone):
     phone_str = str(phone).strip()
