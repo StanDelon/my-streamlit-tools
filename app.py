@@ -117,7 +117,7 @@ if df is not None:
                     y=forecast['yhat'],
                     name="Прогноз",
                     line=dict(color='royalblue', width=3)
-                )
+                ))
                 fig1.add_trace(go.Scatter(
                     x=prophet_df['ds'],
                     y=prophet_df['y'],
