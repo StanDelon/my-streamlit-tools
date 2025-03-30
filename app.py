@@ -104,7 +104,7 @@ if uploaded_file is not None:
                             name='Факт',
                             mode='markers',
                             marker=dict(color='red')
-                        ))
+                        )
                         fig.update_layout(
                             title=f'Прогноз для метрики "{metric_col}"',
                             xaxis_title='Дата',
