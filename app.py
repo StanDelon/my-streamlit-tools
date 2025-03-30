@@ -30,95 +30,103 @@ df = None
 
 if uploaded_file is not None:
     try:
-        # Чтение файла с автоматическим определением формата даты
+        # Чтение файла
         df = pd.read_csv(uploaded_file)
         
-        # Автоматический поиск колонки с датой
+        # Поиск колонки с датой
         date_cols = [col for col in df.columns if any(x in col.lower() for x in ['date', 'time', 'day', 'ds'])]
         
         if not date_cols:
             st.error("Не найдена колонка с датами. Убедитесь, что в файле есть колонка с датой (например, 'date')")
-        else:
-            date_col = date_cols[0]
+            st.stop()
+        
+        date_col = date_cols[0]
+        try:
+            df[date_col] = pd.to_datetime(df[date_col])
+        except:
+            st.error(f"Не удалось преобразовать колонку '{date_col}' в дату. Проверьте формат дат.")
+            st.stop()
+        
+        # Поиск числовых колонок
+        numeric_cols = []
+        for col in df.columns:
+            if col != date_col:
+                try:
+                    df[col] = pd.to_numeric(df[col])
+                    numeric_cols.append(col)
+                except:
+                    continue
+        
+        if not numeric_cols:
+            st.error("Не найдены числовые колонки для анализа. Убедитесь, что в файле есть числовые данные.")
+            st.stop()
+        
+        st.success("Данные успешно загружены!")
+        st.write("Первые 5 строк данных:", df.head())
+        
+        # Настройка прогноза
+        st.subheader("Настройка прогноза")
+        metric_col = st.selectbox("Выберите метрику для прогноза", numeric_cols)
+        forecast_period = st.slider("Горизонт прогноза (дней)", 1, 365, 30)
+        seasonality_mode = st.selectbox("Режим сезонности", ["additive", "multiplicative"])
+        
+        if st.button("Построить прогноз"):
             try:
-                df[date_col] = pd.to_datetime(df[date_col])
-            except:
-                st.error(f"Не удалось преобразовать колонку '{date_col}' в дату. Проверьте формат дат.")
-                st.stop()
-            
-            # Преобразование числовых колонок
-            numeric_cols = []
-            for col in df.columns:
-                if col != date_col:
-                    try:
-                        df[col] = pd.to_numeric(df[col])
-                        numeric_cols.append(col)
-                    except:
-                        pass
-            
-            if not numeric_cols:
-                st.error("Не найдены числовые колонки для анализа. Убедитесь, что в файле есть числовые данные.")
-            else:
-                st.success("Данные успешно загружены!")
-                st.write("Первые 5 строк данных:", df.head())
+                # Подготовка данных
+                prophet_df = df[[date_col, metric_col]].copy()
+                prophet_df.columns = ['ds', 'y']
+                prophet_df = prophet_df.dropna()
                 
-                # Настройка прогноза
-                st.subheader("Настройка прогноза")
-                metric_col = st.selectbox("Выберите метрику для прогноза", numeric_cols)
+                if len(prophet_df) < 10:
+                    st.error("Недостаточно данных для анализа. Нужно как минимум 10 наблюдений.")
+                    st.stop()
                 
-                forecast_period = st.slider("Горизонт прогноза (дней)", 1, 365, 30)
-                seasonality_mode = st.selectbox("Режим сезонности", ["additive", "multiplicative"])
+                # Моделирование
+                model = Prophet(seasonality_mode=seasonality_mode)
+                model.fit(prophet_df)
+                future = model.make_future_dataframe(periods=forecast_period)
+                forecast = model.predict(future)
                 
-                if st.button("Построить прогноз"):
-                    try:
-                        # Подготовка данных для Prophet
-                        prophet_df = df[[date_col, metric_col]].copy()
-                        prophet_df.columns = ['ds', 'y']
-                        prophet_df = prophet_df.dropna()
-                        
-                        if len(prophet_df) < 10:
-                            st.error("Недостаточно данных для анализа. Нужно как минимум 10 наблюдений.")
-                            st.stop()
-                        
-                        # Создание и обучение модели
-                        model = Prophet(seasonality_mode=seasonality_mode)
-                        model.fit(prophet_df)
-                        
-                        # Создание будущих дат
-                        future = model.make_future_dataframe(periods=forecast_period)
-                        forecast = model.predict(future)
-                        
-                        # Визуализация
-                        st.subheader("Результаты прогноза")
-                        
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            x=forecast['ds'],
-                            y=forecast['yhat'],
-                            name='Прогноз',
-                            line=dict(color='blue', width=2)
-                        )
-                        fig.add_trace(go.Scatter(
-                            x=prophet_df['ds'],
-                            y=prophet_df['y'],
-                            name='Факт',
-                            mode='markers',
-                            marker=dict(color='red')
-                        )
-                        fig.update_layout(
-                            title=f'Прогноз для метрики "{metric_col}"',
-                            xaxis_title='Дата',
-                            yaxis_title=metric_col
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Компоненты прогноза
-                        st.subheader("Компоненты прогноза")
-                        fig_components = model.plot_components(forecast)
-                        st.pyplot(fig_components)
-                        
-                    except Exception as e:
-                        st.error(f"Ошибка при построении прогноза: {str(e)}")
+                # Визуализация
+                st.subheader("Результаты прогноза")
+                
+                # Создаем фигуру Plotly
+                fig = go.Figure()
+                
+                # Добавляем прогноз (линия)
+                fig.add_trace(go.Scatter(
+                    x=forecast['ds'],
+                    y=forecast['yhat'],
+                    name='Прогноз',
+                    line=dict(color='blue', width=2)
+                )
+                
+                # Добавляем фактические значения (точки)
+                fig.add_trace(go.Scatter(
+                    x=prophet_df['ds'],
+                    y=prophet_df['y'],
+                    name='Факт',
+                    mode='markers',
+                    marker=dict(color='red', size=5)
+                )
+                
+                # Настройки графика
+                fig.update_layout(
+                    title=f'Прогноз для метрики "{metric_col}"',
+                    xaxis_title='Дата',
+                    yaxis_title=metric_col,
+                    hovermode='x unified'
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Компоненты прогноза
+                st.subheader("Компоненты прогноза")
+                fig_components = model.plot_components(forecast)
+                st.pyplot(fig_components)
+                
+            except Exception as e:
+                st.error(f"Ошибка при построении прогноза: {str(e)}")
     
     except Exception as e:
         st.error(f"Ошибка загрузки файла: {str(e)}")
