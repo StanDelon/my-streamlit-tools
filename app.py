@@ -93,7 +93,7 @@ if uploaded_file is not None:
                 # Создаем фигуру Plotly
                 fig = go.Figure()
                 
-                # Добавляем прогноз (линия)
+                # Прогноз (линия)
                 fig.add_trace(go.Scatter(
                     x=forecast['ds'],
                     y=forecast['yhat'],
@@ -101,7 +101,7 @@ if uploaded_file is not None:
                     line=dict(color='blue', width=2)
                 )
                 
-                # Добавляем фактические значения (точки)
+                # Фактические значения (точки)
                 fig.add_trace(go.Scatter(
                     x=prophet_df['ds'],
                     y=prophet_df['y'],
