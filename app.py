@@ -1,134 +1,220 @@
 import streamlit as st
+import re
+from collections import Counter
+import pymorphy3
 import pandas as pd
-from prophet import Prophet
-import plotly.graph_objects as go
-from datetime import datetime
+import hashlib
 import base64
+import io
+import chardet
+from io import BytesIO
 
 # Настройки страницы
-st.set_page_config(page_title="Прогнозирование рекламы", layout="wide")
-st.title("📈 Прогнозирование эффективности рекламных кампаний")
+st.set_page_config(
+    page_title="Генератор минус-слов",
+    page_icon="🔍",
+    layout="wide"
+)
 
-# Функция для создания шаблона CSV
-def create_download_link():
-    csv = '''date,clicks,cost,conversions
-2023-01-01,100,5000,15
-2023-01-02,120,5500,18
-2023-01-03,130,6000,20'''
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="template.csv">Скачать шаблон CSV</a>'
-    return href
+# Инициализация морфологического анализатора
+try:
+    morph = pymorphy3.MorphAnalyzer()
+except ImportError:
+    st.error("Ошибка: Не установлен модуль pymorphy3. Установите его командой: pip install pymorphy3")
+    st.stop()
 
-# Сайдбар с настройками
-st.sidebar.header("Настройки данных")
-st.sidebar.markdown(create_download_link(), unsafe_allow_html=True)
+# Список исключений для топонимов (можно расширить)
+TOPONYMS = {
+    'москв': 'москва',
+    'питер': 'санкт-петербург',
+    'спб': 'санкт-петербург',
+    'казан': 'казань',
+    'новосиб': 'новосибирск',
+    'екатеринбург': 'екатеринбург',
+    'нижн': 'нижний новгород',
+    'ростов': 'ростов-на-дону'
+}
 
-# Загрузка файла
-uploaded_file = st.sidebar.file_uploader("Загрузите CSV файл", type=["csv"])
+# ===== Функции нормализации =====
+def normalize_word(word, force_exact=False):
+    """Приводит слово к нормальной форме с учетом исключений"""
+    if force_exact or word.startswith('!'):
+        return word.lstrip('!').lower()
+    
+    # Проверка на топонимы
+    word_lower = word.lower()
+    for short, full in TOPONYMS.items():
+        if word_lower.startswith(short):
+            return full
+    
+    # Морфологический анализ
+    parsed = morph.parse(word_lower)[0]
+    
+    # Для существительных используем именительный падеж
+    if 'NOUN' in parsed.tag:
+        return parsed.inflect({'nomn'}).word if parsed.inflect({'nomn'}) else parsed.normal_form
+    
+    # Для остальных - нормальную форму
+    return parsed.normal_form
 
-df = None
+def parse_exclude_input(user_input):
+    """Парсит ввод исключений"""
+    if not user_input:
+        return []
+    
+    # Обработка многострочного ввода
+    if '\n' in user_input:
+        lines = [line.strip() for line in user_input.split('\n') if line.strip()]
+        return [item for line in lines for item in parse_exclude_input(line)]
+    
+    # Обработка вариантов через | или запятые
+    delimiters = ['|', ','] if '|' in user_input else [',']
+    for delim in delimiters:
+        if delim in user_input:
+            return [item.strip() for item in user_input.split(delim) if item.strip()]
+    
+    return [user_input.strip()] if user_input.strip() else []
 
-if uploaded_file is not None:
-    try:
-        # Чтение файла
-        df = pd.read_csv(uploaded_file)
+def get_exclusion_patterns(exclude_list):
+    """Создает regex-паттерны для исключений"""
+    patterns = []
+    for item in exclude_list:
+        item = item.strip()
+        if not item:
+            continue
+            
+        # Обработка точного совпадения
+        force_exact = item.startswith('!')
+        if force_exact:
+            item = item[1:]
+            
+        # Нормализация слова/фразы
+        if ' ' in item:
+            # Для фраз нормализуем каждое слово
+            words = item.split()
+            normalized_words = [normalize_word(w, force_exact) for w in words]
+            pattern = r'\b' + r'\s+'.join(normalized_words) + r'\b'
+        else:
+            # Для отдельных слов
+            normalized = normalize_word(item, force_exact)
+            pattern = r'\b' + re.escape(normalized) + r'\b'
         
-        # Поиск колонки с датой
-        date_cols = [col for col in df.columns if any(x in col.lower() for x in ['date', 'time', 'day', 'ds'])]
-        
-        if not date_cols:
-            st.error("Не найдена колонка с датами. Убедитесь, что в файле есть колонка с датой (например, 'date')")
-            st.stop()
-        
-        date_col = date_cols[0]
-        try:
-            df[date_col] = pd.to_datetime(df[date_col])
-        except:
-            st.error(f"Не удалось преобразовать колонку '{date_col}' в дату. Проверьте формат дат.")
-            st.stop()
-        
-        # Поиск числовых колонок
-        numeric_cols = []
-        for col in df.columns:
-            if col != date_col:
-                try:
-                    df[col] = pd.to_numeric(df[col])
-                    numeric_cols.append(col)
-                except:
-                    continue
-        
-        if not numeric_cols:
-            st.error("Не найдены числовые колонки для анализа. Убедитесь, что в файле есть числовые данные.")
-            st.stop()
-        
-        st.success("Данные успешно загружены!")
-        st.write("Первые 5 строк данных:", df.head())
-        
-        # Настройка прогноза
-        st.subheader("Настройка прогноза")
-        metric_col = st.selectbox("Выберите метрику для прогноза", numeric_cols)
-        forecast_period = st.slider("Горизонт прогноза (дней)", 1, 365, 30)
-        seasonality_mode = st.selectbox("Режим сезонности", ["additive", "multiplicative"])
-        
-        if st.button("Построить прогноз"):
+        patterns.append(pattern)
+    return patterns
+
+def should_exclude(word, exclude_patterns):
+    """Проверяет, нужно ли исключать слово"""
+    for pattern in exclude_patterns:
+        if re.search(pattern, word, re.IGNORECASE):
+            return True
+    return False
+
+def process_phrases(phrases, exclude_patterns, min_word_length=3):
+    """Обрабатывает фразы и извлекает минус-слова"""
+    words_counter = Counter()
+    
+    for phrase in phrases:
+        # Извлекаем слова, игнорируя цифры и короткие слова
+        words = re.findall(r'\b[a-zA-Zа-яА-ЯёЁ]{3,}\b', phrase.lower())
+        for word in words:
+            normalized = normalize_word(word)
+            if not should_exclude(normalized, exclude_patterns):
+                words_counter[normalized] += 1
+    
+    # Сортируем по частоте и алфавиту
+    return sorted(words_counter.keys(), key=lambda x: (-words_counter[x], x))
+
+# ===== Streamlit интерфейс =====
+st.title("🔍 Генератор минус-слов с правильной нормализацией")
+st.markdown("---")
+
+# Входные данные
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("1. Введите фразы для анализа")
+    phrases_input = st.text_area(
+        "Каждая фраза с новой строки",
+        height=200,
+        help="Пример:\nкупить цветы в москве\nдоставка цветов в питер"
+    )
+
+with col2:
+    st.subheader("2. Укажите исключения")
+    exclude_input = st.text_area(
+        "Формат: слово1, слово2, (вариант1|вариант2)",
+        height=200,
+        help="Пример:\nцветы, !точное, доставк*, (москв|питер)"
+    )
+
+# Настройки обработки
+st.markdown("---")
+st.subheader("3. Настройки обработки")
+
+min_length = st.slider(
+    "Минимальная длина слова",
+    min_value=2,
+    max_value=10,
+    value=3,
+    help="Слова короче указанной длины будут игнорироваться"
+)
+
+show_stats = st.checkbox(
+    "Показать статистику по словам",
+    value=True,
+    help="Отображает частоту встречаемости слов"
+)
+
+# Обработка
+if st.button("🚀 Сгенерировать минус-слова", type="primary"):
+    if not phrases_input:
+        st.error("Введите фразы для анализа!")
+    else:
+        with st.spinner("Обработка данных..."):
             try:
                 # Подготовка данных
-                prophet_df = df[[date_col, metric_col]].copy()
-                prophet_df.columns = ['ds', 'y']
-                prophet_df = prophet_df.dropna()
+                phrases_list = [p.strip() for p in phrases_input.split('\n') if p.strip()]
+                exclude_list = parse_exclude_input(exclude_input)
+                exclude_patterns = get_exclusion_patterns(exclude_list)
                 
-                if len(prophet_df) < 10:
-                    st.error("Недостаточно данных для анализа. Нужно как минимум 10 наблюдений.")
-                    st.stop()
+                # Генерация минус-слов
+                minus_words = process_phrases(phrases_list, exclude_patterns, min_length)
                 
-                # Моделирование
-                model = Prophet(seasonality_mode=seasonality_mode)
-                model.fit(prophet_df)
-                future = model.make_future_dataframe(periods=forecast_period)
-                forecast = model.predict(future)
+                # Вывод результатов
+                st.success("✅ Готово!")
                 
-                # Визуализация
-                st.subheader("Результаты прогноза")
+                # Вкладки с разными форматами вывода
+                tab1, tab2 = st.tabs(["Текстовый формат", "Подробный отчет"])
                 
-                # Создаем фигуру Plotly
-                fig = go.Figure()
+                with tab1:
+                    st.text_area(
+                        "Минус-слова (для копирования)",
+                        value=" ".join([f"-{word}" for word in minus_words]),
+                        height=100
+                    )
                 
-                # Прогноз (линия)
-                fig.add_trace(go.Scatter(
-                    x=forecast['ds'],
-                    y=forecast['yhat'],
-                    name='Прогноз',
-                    line=dict(color='blue', width=2)
-                )
+                with tab2:
+                    # Подсчет частоты слов
+                    words_freq = Counter()
+                    for phrase in phrases_list:
+                        words = re.findall(r'\b[a-zA-Zа-яА-ЯёЁ]{3,}\b', phrase.lower())
+                        for word in words:
+                            normalized = normalize_word(word)
+                            if not should_exclude(normalized, exclude_patterns):
+                                words_freq[normalized] += 1
+                    
+                    # Создаем DataFrame для отчета
+                    df_report = pd.DataFrame.from_dict(words_freq, orient='index', columns=['Частота'])
+                    df_report = df_report.sort_values(by='Частота', ascending=False)
+                    
+                    st.dataframe(df_report)
+                    st.bar_chart(df_report.head(20))
                 
-                # Фактические значения (точки)
-                fig.add_trace(go.Scatter(
-                    x=prophet_df['ds'],
-                    y=prophet_df['y'],
-                    name='Факт',
-                    mode='markers',
-                    marker=dict(color='red', size=5)
-                )
-                
-                # Настройки графика
-                fig.update_layout(
-                    title=f'Прогноз для метрики "{metric_col}"',
-                    xaxis_title='Дата',
-                    yaxis_title=metric_col,
-                    hovermode='x unified'
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Компоненты прогноза
-                st.subheader("Компоненты прогноза")
-                fig_components = model.plot_components(forecast)
-                st.pyplot(fig_components)
-                
+                st.info(f"Всего сгенерировано {len(minus_words)} минус-слов")
+            
             except Exception as e:
-                st.error(f"Ошибка при построении прогноза: {str(e)}")
-    
-    except Exception as e:
-        st.error(f"Ошибка загрузки файла: {str(e)}")
-else:
-    st.info("Загрузите CSV файл для анализа (используйте шаблон выше)")
+                st.error(f"Ошибка обработки: {str(e)}")
+
+# Футер
+st.markdown("---")
+st.caption("Версия 3.0 | Генератор минус-слов с правильной нормализацией")
