@@ -3,249 +3,196 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
 import requests
-import json
 from io import StringIO
+import os
 
 # Настройки страницы
 st.set_page_config(
-    page_title="Яндекс.Директ Дашборд | primepark-lynx", 
-    page_icon="📊", 
+    page_title="Яндекс.Директ Дашборд",
     layout="wide",
-    initial_sidebar_state="expanded"
+    page_icon="📊"
 )
 
-# Конфигурация API
-CLIENT_LOGIN = "primepark-lynx"
-TOKEN = "y0__xDUjbv7BxjcvTYgyK3Q1BL49Fo8XkTMl71y6FccfvfIbzpRxw"
-BASE_URL = "https://api.direct.yandex.com/json/v5/"
+# Загрузка конфигурации
+try:
+    TOKEN = st.secrets["YANDEX_TOKEN"]
+    LOGIN = st.secrets["CLIENT_LOGIN"]
+except:
+    st.error("Не удалось загрузить конфигурацию. Проверьте secrets.toml")
+    st.stop()
 
-# Заголовки для запросов
+# Константы API
+API_URL = "https://api.direct.yandex.com/json/v5/"
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
-    "Client-Login": CLIENT_LOGIN,
+    "Client-Login": LOGIN,
     "Accept-Language": "ru",
     "Content-Type": "application/json"
 }
 
-# Функция для получения списка кампаний
+# Функции для работы с API
 def get_campaigns():
     body = {
         "method": "get",
         "params": {
             "SelectionCriteria": {},
-            "FieldNames": ["Id", "Name", "Status", "Type", "StartDate", "EndDate"],
+            "FieldNames": ["Id", "Name", "Status"]
         }
     }
     
-    response = requests.post(
-        f"{BASE_URL}campaigns",
-        headers=HEADERS,
-        json=body
-    )
-    
-    if response.status_code == 200:
-        return response.json().get("result", {}).get("Campaigns", [])
-    else:
-        st.error(f"Ошибка при получении кампаний: {response.text}")
+    try:
+        response = requests.post(
+            f"{API_URL}campaigns",
+            headers=HEADERS,
+            json=body
+        )
+        if response.status_code == 200:
+            return response.json().get("result", {}).get("Campaigns", [])
+        else:
+            st.error(f"API Error: {response.json()}")
+            return []
+    except Exception as e:
+        st.error(f"Connection error: {str(e)}")
         return []
 
-# Функция для получения статистики
-def get_statistics(date_from, date_to, campaign_ids=None):
-    selection_criteria = {
+def get_report(date_from, date_to, campaign_ids=None):
+    selection = {
         "DateFrom": date_from.strftime("%Y-%m-%d"),
         "DateTo": date_to.strftime("%Y-%m-%d")
     }
     
     if campaign_ids:
-        selection_criteria["CampaignIds"] = campaign_ids
+        selection["CampaignIds"] = campaign_ids
     
     body = {
         "params": {
-            "SelectionCriteria": selection_criteria,
-            "FieldNames": ["Date", "CampaignId", "CampaignName", "Clicks", "Impressions", "Cost", "Ctr"],
-            "ReportName": "Campaign Performance",
+            "SelectionCriteria": selection,
+            "FieldNames": ["Date", "CampaignId", "CampaignName", 
+                         "Clicks", "Impressions", "Cost", "Ctr"],
             "ReportType": "CAMPAIGN_PERFORMANCE_REPORT",
             "DateRangeType": "CUSTOM_DATE",
             "Format": "TSV",
-            "IncludeVAT": "YES",
-            "IncludeDiscount": "NO"
+            "IncludeVAT": "YES"
         }
     }
     
-    response = requests.post(
-        f"{BASE_URL}reports",
-        headers=HEADERS,
-        json=body
-    )
-    
-    if response.status_code == 200:
-        # Преобразуем TSV в DataFrame
-        data = StringIO(response.text)
-        df = pd.read_csv(data, sep='\t')
-        return df
-    else:
-        st.error(f"Ошибка при получении статистики: {response.text}")
+    try:
+        response = requests.post(
+            f"{API_URL}reports",
+            headers=HEADERS,
+            json=body
+        )
+        
+        if response.status_code == 200:
+            return pd.read_csv(StringIO(response.text), sep="\t")
+        else:
+            st.error(f"Report error: {response.text}")
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Report generation failed: {str(e)}")
         return pd.DataFrame()
 
 # Интерфейс приложения
-st.title(f"📊 Яндекс.Директ Дашборд | {CLIENT_LOGIN}")
-
-# Сайдбар с настройками
-with st.sidebar:
-    st.header("⚙️ Настройки отчёта")
+def main():
+    st.title("📊 Яндекс.Директ Аналитика")
     
-    # Выбор дат
-    default_end = datetime.now()
-    default_start = default_end - timedelta(days=30)
-    
-    date_from = st.date_input(
-        "Дата начала", 
-        default_start,
-        key="date_from"
-    )
-    date_to = st.date_input(
-        "Дата окончания", 
-        default_end,
-        key="date_to"
-    )
-    
-    # Фильтр по кампаниям
-    st.header("🔍 Фильтры")
-    try:
-        campaigns = get_campaigns()
-        campaign_options = {c["Name"]: c["Id"] for c in campaigns}
+    # Сайдбар с настройками
+    with st.sidebar:
+        st.header("Параметры отчета")
         
-        selected_names = st.multiselect(
-            "Выберите кампании",
+        # Выбор даты
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=30)
+        
+        date_from = st.date_input("Начальная дата", start_date)
+        date_to = st.date_input("Конечная дата", end_date)
+        
+        # Выбор кампаний
+        st.header("Фильтры")
+        with st.spinner("Загрузка кампаний..."):
+            campaigns = get_campaigns()
+        
+        campaign_options = {c["Name"]: c["Id"] for c in campaigns}
+        selected_campaigns = st.multiselect(
+            "Кампании",
             options=list(campaign_options.keys()),
             default=list(campaign_options.keys())[:3] if campaign_options else []
         )
-        selected_ids = [campaign_options[name] for name in selected_names]
-    except Exception as e:
-        st.error(f"Ошибка при загрузке кампаний: {str(e)}")
-        selected_ids = None
-
-# Получение данных
-try:
-    with st.spinner("Загрузка данных из Яндекс.Директ..."):
-        df = get_statistics(date_from, date_to, selected_ids if selected_ids else None)
+        
+        selected_ids = [campaign_options[name] for name in selected_campaigns]
+    
+    # Основная область
+    with st.spinner("Формирование отчета..."):
+        df = get_report(date_from, date_to, selected_ids if selected_ids else None)
         
         if df.empty:
-            st.warning("Нет данных для отображения. Проверьте настройки фильтров.")
-            st.stop()
+            st.warning("Нет данных для отображения")
+            return
         
-        # Преобразование данных
+        # Обработка данных
         df["Date"] = pd.to_datetime(df["Date"])
         df["CTR"] = df["Ctr"] * 100
-        df["CPC"] = df.apply(lambda x: x["Cost"] / x["Clicks"] if x["Clicks"] > 0 else 0, axis=1)
-        df.rename(columns={
-            "CampaignName": "Campaign",
-            "Ctr": "CTR_raw"
-        }, inplace=True)
-
+        df["CPC"] = df["Cost"] / df["Clicks"].replace(0, 1)
+        df = df.rename(columns={"CampaignName": "Campaign"})
+    
     # Ключевые метрики
-    st.subheader("📈 Ключевые показатели")
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    st.header("Ключевые показатели")
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("Клики", f"{df['Clicks'].sum():,}")
+    with cols[1]:
+        st.metric("Показы", f"{df['Impressions'].sum():,}")
+    with cols[2]:
+        st.metric("Расходы", f"{df['Cost'].sum():,.0f} ₽")
+    with cols[3]:
+        st.metric("CTR", f"{df['Clicks'].sum() / df['Impressions'].sum() * 100:.2f}%")
     
-    total_clicks = df["Clicks"].sum()
-    total_impressions = df["Impressions"].sum()
-    total_cost = df["Cost"].sum()
-    avg_ctr = (df["Clicks"].sum() / df["Impressions"].sum() * 100) if df["Impressions"].sum() > 0 else 0
-    
-    kpi1.metric(
-        label="Общие клики", 
-        value=f"{total_clicks:,}",
-        delta=f"{total_clicks/len(df['Date'].unique()):.0f} в день"
-    )
-    kpi2.metric(
-        label="Общие показы", 
-        value=f"{total_impressions:,}",
-        delta=f"{total_impressions/len(df['Date'].unique()):,.0f} в день"
-    )
-    kpi3.metric(
-        label="Общий бюджет", 
-        value=f"{total_cost:,.0f} ₽",
-        delta=f"{total_cost/len(df['Date'].unique()):,.0f} ₽ в день"
-    )
-    kpi4.metric(
-        label="Средний CTR", 
-        value=f"{avg_ctr:.2f}%",
-        delta=f"{avg_ctr - (df[df['Date'] < df['Date'].max()]['Clicks'].sum() / df[df['Date'] < df['Date'].max()]['Impressions'].sum() * 100 if df[df['Date'] < df['Date'].max()]['Impressions'].sum() > 0 else 0):.2f}%"
-    )
-
     # Визуализации
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Динамика", "🔄 CTR", "💰 Расходы", "📋 Данные"])
-
+    st.header("Визуализация данных")
+    tab1, tab2, tab3 = st.tabs(["Динамика", "Эффективность", "Данные"])
+    
     with tab1:
         fig = px.line(
-            df.groupby('Date').agg({
-                'Clicks': 'sum',
-                'Impressions': 'sum'
-            }).reset_index(),
-            x='Date',
-            y=['Clicks', 'Impressions'],
-            title='Динамика кликов и показов',
-            labels={'value': 'Количество', 'variable': 'Метрика'},
-            height=500
+            df.groupby("Date").sum().reset_index(),
+            x="Date",
+            y=["Clicks", "Impressions"],
+            title="Динамика показов и кликов"
         )
         st.plotly_chart(fig, use_container_width=True)
-
+    
     with tab2:
         col1, col2 = st.columns(2)
         with col1:
-            fig_ctr = px.line(
-                df.groupby('Date')['CTR'].mean().reset_index(),
-                x='Date',
-                y='CTR',
-                title='Средний CTR по дням',
-                labels={'CTR': 'CTR (%)'},
-                height=400
+            fig = px.bar(
+                df.groupby("Campaign").mean().reset_index(),
+                x="Campaign",
+                y="CTR",
+                title="CTR по кампаниям"
             )
-            st.plotly_chart(fig_ctr, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            fig_ctr_campaign = px.bar(
-                df.groupby('Campaign')['CTR'].mean().sort_values().reset_index(),
-                x='CTR',
-                y='Campaign',
-                orientation='h',
-                title='CTR по кампаниям (средний)',
-                labels={'CTR': 'CTR (%)'},
-                height=400
+            fig = px.scatter(
+                df,
+                x="Cost",
+                y="Clicks",
+                color="Campaign",
+                size="Impressions",
+                title="Эффективность кампаний"
             )
-            st.plotly_chart(fig_ctr_campaign, use_container_width=True)
-
+            st.plotly_chart(fig, use_container_width=True)
+    
     with tab3:
-        fig_cost = px.area(
-            df.groupby(['Date', 'Campaign'])['Cost'].sum().reset_index(),
-            x='Date',
-            y='Cost',
-            color='Campaign',
-            title='Распределение расходов по кампаниям',
-            labels={'Cost': 'Расходы (₽)'},
-            height=500
-        )
-        st.plotly_chart(fig_cost, use_container_width=True)
-
-    with tab4:
         st.dataframe(
-            df.sort_values(['Date', 'Campaign'])[['Date', 'Campaign', 'Clicks', 'Impressions', 'Cost', 'CTR', 'CPC']],
+            df.sort_values("Date"),
             column_config={
                 "Date": st.column_config.DateColumn("Дата"),
                 "Cost": st.column_config.NumberColumn("Расходы", format="%.0f ₽"),
-                "CTR": st.column_config.NumberColumn("CTR", format="%.2f%%"),
-                "CPC": st.column_config.NumberColumn("CPC", format="%.2f ₽")
+                "CTR": st.column_config.NumberColumn("CTR", format="%.2f%%")
             },
             hide_index=True,
             use_container_width=True
         )
 
-except Exception as e:
-    st.error(f"Произошла ошибка: {str(e)}")
-
-# Footer
-st.markdown("---")
-st.markdown(f"""
-    **Аккаунт:** {CLIENT_LOGIN}  
-    **Последнее обновление:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-""")
+if __name__ == "__main__":
+    main()
